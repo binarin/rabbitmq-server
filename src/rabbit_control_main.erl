@@ -753,15 +753,29 @@ default_if_empty(List, Default) when is_list(List) ->
        true       -> [list_to_atom(X) || X <- List]
     end.
 
+display_info_message_row(IsEscaped, Result, InfoItemKeys) ->
+    display_row([format_info_item(
+                   case proplists:lookup(X, Result) of
+                       none when is_list(Result), length(Result) > 0 ->
+                           exit({error, {bad_info_key, X}});
+                       none -> Result;
+                       {X, Value} -> Value
+                   end, IsEscaped) || X <- InfoItemKeys]).
+
 display_info_message(IsEscaped) ->
-    fun(Result, InfoItemKeys) ->
-            display_row([format_info_item(
-                           case proplists:lookup(X, Result) of
-                               none when is_list(Result), length(Result) > 0 ->
-                                   exit({error, {bad_info_key, X}});
-                               none -> Result;
-                               {X, Value} -> Value
-                           end, IsEscaped) || X <- InfoItemKeys])
+    fun ([], _) ->
+            io:format(standard_error, "Empty result~n", []),
+            ok;
+        ([FirstResult|_] = List, InfoItemKeys) when is_list(FirstResult) ->
+            io:format(standard_error, "List result: ~p~n", [List]),
+            lists:foreach(fun(Result) ->
+                                  display_info_message_row(IsEscaped, Result, InfoItemKeys)
+                          end,
+                          List),
+            ok;
+        (Result, InfoItemKeys) ->
+            io:format(standard_error, "Single result: ~p~n", [Result]),
+            display_info_message_row(IsEscaped, Result, InfoItemKeys)
     end.
 
 display_info_list(Results, InfoItemKeys) when is_list(Results) ->
