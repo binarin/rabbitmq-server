@@ -41,4 +41,20 @@ ENABLED_PLUGINS_FILE=${SYS_PREFIX}/etc/rabbitmq/enabled_plugins
 
 PLUGINS_DIR="${RABBITMQ_HOME}/plugins"
 
+# Search for another `plugins` directory towards the filesystem
+# root. This is useful when we want to have some common place to put
+# pre-packaged plugins. And $RABBITMQ_HOME usually contains RabbitMQ
+# version somewhere in the middle, making plugin packaging very
+# inconvinient.
+plugins_test_path="$(dirname $(dirname "$PLUGINS_DIR"))"
+while test "$plugins_test_path" != "/"; do
+    if find "$plugins_test_path" -maxdepth 1 -mindepth 1 -type d -name plugins | grep -q plugins ; then
+        PLUGINS_DIR="$plugins_test_path/plugins:$PLUGINS_DIR"
+        break
+    else
+        plugins_test_path="$(dirname "$plugins_test_path")"
+    fi
+done
+unset plugins_test_path
+
 CONF_ENV_FILE=${SYS_PREFIX}/etc/rabbitmq/rabbitmq-env.conf

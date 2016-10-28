@@ -84,34 +84,14 @@ active() ->
             lists:member(App, InstalledPlugins)].
 
 %% @doc Get the list of plugins which are ready to be enabled.
-list(PluginsDir) ->
-    list(PluginsDir, false).
+list(PluginsPath) ->
+    list(PluginsPath, false).
 
-list(PluginsDir, IncludeRequiredDeps) ->
-    EZs = [{ez, EZ} || EZ <- filelib:wildcard("*.ez", PluginsDir)],
-    FreeApps = [{app, App} ||
-                   App <- filelib:wildcard("*/ebin/*.app", PluginsDir)],
-    %% We load the "rabbit" application to be sure we can get the
-    %% "applications" key. This is required for rabbitmq-plugins for
-    %% instance.
-    application:load(rabbit),
-    {ok, RabbitDeps} = application:get_key(rabbit, applications),
-    {AvailablePlugins, Problems} =
-        lists:foldl(fun ({error, EZ, Reason}, {Plugins1, Problems1}) ->
-                            {Plugins1, [{EZ, Reason} | Problems1]};
-                        (Plugin = #plugin{name = Name}, {Plugins1, Problems1}) ->
-                            %% Applications RabbitMQ depends on (eg.
-                            %% "rabbit_common") can't be considered
-                            %% plugins, otherwise rabbitmq-plugins would
-                            %% list them and the user may believe he can
-                            %% disable them.
-                            case IncludeRequiredDeps orelse
-                              not lists:member(Name, RabbitDeps) of
-                                true  -> {[Plugin|Plugins1], Problems1};
-                                false -> {Plugins1, Problems1}
-                            end
-                    end, {[], []},
-                    [plugin_info(PluginsDir, Plug) || Plug <- EZs ++ FreeApps]),
+list(PluginsPath, IncludeRequiredDeps) ->
+    PluginsDirs = split_path(PluginsPath),
+    EZs = list_ezs(PluginsDirs),
+    FreeApps = list_free_apps(PluginsDirs),
+    {AvailablePlugins, Problems} = collect_plugins_info(EZs ++ FreeApps, IncludeRequiredDeps),
     case Problems of
         [] -> ok;
         _  -> rabbit_log:warning(
@@ -259,14 +239,12 @@ prepare_plugin(#plugin{type = dir, name = Name, location = Location},
                ExpandDir) ->
     rabbit_file:recursive_copy(Location, filename:join([ExpandDir, Name])).
 
-plugin_info(Base, {ez, EZ0}) ->
-    EZ = filename:join([Base, EZ0]),
+plugin_info({ez, EZ}) ->
     case read_app_file(EZ) of
         {application, Name, Props} -> mkplugin(Name, Props, ez, EZ);
         {error, Reason}            -> {error, EZ, Reason}
     end;
-plugin_info(Base, {app, App0}) ->
-    App = filename:join([Base, App0]),
+plugin_info({app, App}) ->
     case rabbit_file:read_term_file(App) of
         {ok, [{application, Name, Props}]} ->
             mkplugin(Name, Props, dir,
@@ -317,3 +295,66 @@ plugin_names(Plugins) ->
 
 lookup_plugins(Names, AllPlugins) ->
     [P || P = #plugin{name = Name} <- AllPlugins, lists:member(Name, Names)].
+
+%% Split PATH-like value into its components.
+split_path(PathString) ->
+    Delimiters = case os:type() of
+                     {unix, _} -> ":";
+                     {win32, _} -> ";"
+                 end,
+    string:tokens(PathString, Delimiters).
+
+%% Search for files using glob in a given dir. Returns full filenames of those files.
+full_path_wildcard(Glob, Dir) ->
+    [filename:join([Dir, File]) || File <- filelib:wildcard(Glob, Dir)].
+
+%% Returns list off all .ez files in a given set of directories
+list_ezs([]) ->
+    [];
+list_ezs([Dir|Rest]) ->
+    [{ez, EZ} || EZ <- full_path_wildcard("*.ez", Dir)] ++ list_ezs(Rest).
+
+%% Returns list of all files that look like OTP applications in a
+%% given set of directories.
+list_free_apps([]) ->
+    [];
+list_free_apps([Dir|Rest]) ->
+    [{app, App} || App <- full_path_wildcard("*/ebin/*.app", Dir)]
+        ++ list_free_apps(Rest).
+
+%% Tries to fetch plugin info for a given list of paths. Returns
+%% information about successfully parsed plugins, and separately about
+%% any problems encountered.
+-spec collect_plugins_info([PluginInFilesystem], boolean()) -> {[#plugin{}], [Problem]} when
+      PluginInFilesystem :: {ez, file:name()} | {app, file:name()},
+      Problem :: {file:name(), term()}.
+collect_plugins_info(PluginsInFilesystem, IncludeRequiredDeps) ->
+    %% We load the "rabbit" application to be sure we can get the
+    %% "applications" key. This is required for rabbitmq-plugins for
+    %% instance.
+    application:load(rabbit),
+    {ok, RabbitDeps} = application:get_key(rabbit, applications),
+    lists:foldl(fun ({error, Location, Reason}, {Plugins1, Problems1}) ->
+                        {Plugins1, [{Location, Reason} | Problems1]};
+                    (Plugin = #plugin{name = Name, location = Location}, {Plugins1, Problems1}) ->
+                        %% Applications RabbitMQ depends on (eg.
+                        %% "rabbit_common") can't be considered
+                        %% plugins, otherwise rabbitmq-plugins would
+                        %% list them and the user may believe he can
+                        %% disable them.
+                        IsRabbitDep = lists:member(Name, RabbitDeps),
+                        ShouldSkipInternal = not IncludeRequiredDeps andalso IsRabbitDep,
+
+                        ShouldSkipDuplicate = lists:any(fun (#plugin{name = OtherName}) ->
+                                                        Name =:= OtherName
+                                                end, Plugins1),
+                        case {ShouldSkipInternal, ShouldSkipDuplicate} of
+                            {_, true} ->
+                                {Plugins1, [{Location, duplicate_plugin}|Problems1]};
+                            {true, _} ->
+                                {Plugins1, Problems1};
+                            {false, _} ->
+                                {[Plugin|Plugins1], Problems1}
+                        end
+                end, {[], []},
+                [plugin_info(Plug) || Plug <- PluginsInFilesystem]).
