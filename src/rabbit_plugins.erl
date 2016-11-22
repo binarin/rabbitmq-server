@@ -91,7 +91,9 @@ list(PluginsPath, IncludeRequiredDeps) ->
     PluginsDirs = split_path(PluginsPath),
     EZs = list_ezs(PluginsDirs),
     FreeApps = list_free_apps(PluginsDirs),
-    {AvailablePlugins, Problems} = collect_plugins_info(EZs ++ FreeApps, IncludeRequiredDeps),
+    MostRecentFirst = lists:sort(fun compare_by_name_and_version/2,
+                                 EZs ++ FreeApps),
+    {AvailablePlugins, Problems} = collect_plugins_info(MostRecentFirst, IncludeRequiredDeps),
     case Problems of
         [] -> ok;
         _  -> rabbit_log:warning(
@@ -358,3 +360,8 @@ collect_plugins_info(PluginsInFilesystem, IncludeRequiredDeps) ->
                         end
                 end, {[], []},
                 [plugin_info(Plug) || Plug <- PluginsInFilesystem]).
+
+
+compare_by_name_and_version(#plugin{name = NameA, version = VersionA},
+                            #plugin{name = NameB, version = VersionB}) ->
+    NameA =< NameB orelse ec_semver:lte(VersionA, VersionB).
